@@ -1,6 +1,9 @@
 import time
 from PIL import Image
 import numpy as np
+import pyopencl as cl
+import os
+
 
 # A pixel is part of a cell if its brightness is lower than THRESHOLD.
 THRESHOLD = 200
@@ -18,6 +21,12 @@ IMAGES = [
     "./images/Thrombocytosis.jpg",
     # "./images/tiny-example.bmp",  # Used in the assignment
 ]
+
+context = cl.create_some_context()
+queue = cl.CommandQueue(context)
+kernel_file = os.path.join(os.path.dirname(os.path.realpath(__file__)), "main.cl")
+kernel_code = open(kernel_file).read()
+program = cl.Program(context, kernel_code).build()
 
 
 def load_image(path):
@@ -42,7 +51,7 @@ def is_part_of_cell(pixel):
     return pixel_brightness(pixel) < THRESHOLD
 
 
-def image_to_mask_matrix(image):
+def image_to_mask_matrix2(image):
     """Convert an image to a "mask matrix". In this matrix:
     - Pixels that are not part of a cell (= "background pixels") are set to -1.
     - Pixels that are part of a cell are set to a unique number. This number is
@@ -54,12 +63,44 @@ def image_to_mask_matrix(image):
     for row in range(height):  # row = y
         for col in range(width):  # col = x
             pixel = image[row, col]
+            print(pixel)
             if is_part_of_cell(pixel):
                 mask_matrix[row, col] = row * width + col
             else:
                 mask_matrix[row, col] = -1
 
     return mask_matrix
+
+def image_to_mask_matrix(image):
+    """Convertit une image en matrice de masque en utilisant OpenCL"""
+    height, width, _ = image.shape
+    
+    # Convertir en RGBA si nécessaire
+    if image.shape[2] == 3:
+        image_rgba = np.empty((height, width, 4), dtype=np.uint8)
+        image_rgba[..., :3] = image
+        image_rgba[..., 3] = 255
+        image = image_rgba
+    
+    # Aplatir l'image pour le transfert
+    image_flat = image.reshape(-1)
+    
+    # Créer les buffers
+    mf = cl.mem_flags
+    img_buf = cl.Buffer(context, mf.READ_ONLY | mf.COPY_HOST_PTR, hostbuf=image_flat)
+    mask_buf = cl.Buffer(context, mf.WRITE_ONLY, size=height * width * np.dtype('int32').itemsize)
+    
+    # Exécuter le kernel
+    program.image_to_mask_matrix(queue, (width, height), None, 
+                               img_buf, mask_buf, 
+                               np.int32(width), np.int32(height))
+    
+    # Récupérer les résultats
+    mask_matrix = np.empty((height, width), dtype=np.int32)
+    cl.enqueue_copy(queue, mask_matrix, mask_buf).wait()
+    
+    return mask_matrix
+
 
 
 def count_cells(mask_matrix):
@@ -317,7 +358,7 @@ def main():
         # Generate image with the cells highlighted, using different colors.
         # This might be useful for debugging.
         cell_image = highlight_cells(cell_numbers)
-        Image.fromarray(cell_image).save(f"{image_name}.result.png")
+        Image.fromarray(cell_image).save(f"results/{image_name}.result.png")
         # Note: even though the input is JPG, it is better to save the output
         # as PNG, to avoid compression artifacts.
 
