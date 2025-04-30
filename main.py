@@ -103,7 +103,7 @@ def image_to_mask_matrix(image):
 
 
 
-def count_cells(mask_matrix):
+def count_cells2(mask_matrix):
     """Find and count the number of cells in the mask matrix.
     This returns the number of cells, as well as an 'image' of cell numbers."""
     height, width = mask_matrix.shape
@@ -126,9 +126,9 @@ def count_cells(mask_matrix):
     def find(x):
         """Find the root of a pixel."""
         if parent[x] != x:  # Is this a root pixel?
-            # No: continue up the tree
-            parent[x] = find(parent[x])
+            return find(parent[x])  # Doesn't re-assign parent[x]
         return parent[x]
+
 
     def union(x, y):
         """Merge two pixels and their cells."""
@@ -195,6 +195,52 @@ def count_cells(mask_matrix):
 
     # Return the number of cells, as well as the 'image' of cell numbers.
     # The cell numbers can be used for debugging.
+    return (cell_count, cell_numbers)
+
+def count_cells(mask_matrix):
+    """Find and count the number of cells using OpenCL merge_cells kernel but executing sequentially"""
+    height, width = mask_matrix.shape
+    max_cells = height * width
+
+    # Créer les buffers OpenCL
+    mf = cl.mem_flags
+    mask_buf = cl.Buffer(context, mf.READ_ONLY | mf.COPY_HOST_PTR, hostbuf=mask_matrix.flatten())
+    parent_buf = cl.Buffer(context, mf.READ_WRITE, size=max_cells * np.dtype(np.int32).itemsize)
+    rank_buf = cl.Buffer(context, mf.READ_WRITE, size=max_cells * np.dtype(np.int32).itemsize)
+
+    # La clé est d'exécuter le kernel avec un pixel à la fois
+    # Plutôt que de créer un nouveau kernel, nous exécutons le kernel existant de façon séquentielle
+    for row in range(height):
+        for col in range(width):
+            # Exécute le kernel pour un seul pixel à la fois
+            program.merge_cells(queue, (1, 1), None,
+                           mask_buf, parent_buf, rank_buf,
+                           np.int32(width), np.int32(height),
+                           global_offset=(col, row))  # Déplace le point de départ du work-item
+            queue.finish()  # Assure que le kernel termine avant de traiter le pixel suivant
+    
+    # Lire les résultats
+    parent = np.empty(max_cells, dtype=np.int32)
+    cl.enqueue_copy(queue, parent, parent_buf).wait()
+    
+    # Trouver les parents racines pour chaque cellule
+    cell_numbers = np.zeros((height, width), dtype=np.int32)
+    for row in range(height):
+        for col in range(width):
+            index = row * width + col
+            if mask_matrix[row, col] == -1:
+                cell_numbers[row, col] = -1
+            else:
+                # Trouver le parent racine
+                root = index
+                while parent[root] != root and parent[root] != 0:  # Ajouter vérification pour éviter boucle infinie
+                    root = parent[root]
+                cell_numbers[row, col] = root
+    
+    # Compter les racines uniques (excluant -1)
+    unique_cells = np.unique(cell_numbers)
+    cell_count = len(unique_cells) - 1 if -1 in unique_cells else len(unique_cells)
+    
     return (cell_count, cell_numbers)
 
 
