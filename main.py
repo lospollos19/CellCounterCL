@@ -19,7 +19,7 @@ IMAGES = [
     "./images/RBCs_Platelets_WBC_in_PBS_2.jpg",
     "./images/Thrombocytes.jpg",
     "./images/Thrombocytosis.jpg",
-    # "./images/tiny-example.bmp",  # Used in the assignment
+     "./images/tiny-example.bmp",  # Used in the assignment
 ]
 
 context = cl.create_some_context()
@@ -50,37 +50,53 @@ def is_part_of_cell(pixel):
     threshold."""
     return pixel_brightness(pixel) < THRESHOLD
 
-
-def image_to_mask_matrix2(image):
-    """Convert an image to a "mask matrix". In this matrix:
-    - Pixels that are not part of a cell (= "background pixels") are set to -1.
-    - Pixels that are part of a cell are set to a unique number. This number is
-      the 'global index' of the pixel, i.e. `row * width + col`.
+def print_matrix(matrix, cell_width=4, decimals=2, title=None, highlight_value=None, highlight_color='\033[91m'):
     """
-    height, width, _channels = image.shape  # channels is 3 for RGB images
-    mask_matrix = np.zeros((height, width), dtype=np.int32)
-
-    for row in range(height):  # row = y
-        for col in range(width):  # col = x
-            pixel = image[row, col]
-            print(pixel)
-            if is_part_of_cell(pixel):
-                mask_matrix[row, col] = row * width + col
+    Affiche une matrice de manière formatée et lisible.
+    
+    Args:
+        matrix: La matrice à afficher (liste 2D ou np.array)
+        cell_width: Largeur de chaque cellule (default: 4)
+        decimals: Nombre de décimales pour les floats (default: 2)
+        title: Titre à afficher au-dessus (default: None)
+        highlight_value: Valeur à mettre en évidence (default: None)
+        highlight_color: Code couleur ANSI pour le surlignage (default: rouge)
+    """
+    # Reset color
+    reset_color = '\033[0m'
+    
+    if title:
+        print(f"\n{title.center(cell_width * len(matrix[0]))}\n")
+    
+    for row in matrix:
+        formatted_row = []
+        for val in row:
+            # Formatage différent selon le type
+            if isinstance(val, float):
+                s = f"{val:.{decimals}f}"
+            elif isinstance(val, (int, np.integer)):
+                s = f"{val:d}"
             else:
-                mask_matrix[row, col] = -1
-
-    return mask_matrix
+                s = str(val)
+            
+            # Mise en évidence si demandée
+            if highlight_value is not None and val == highlight_value:
+                s = f"{highlight_color}{s}{reset_color}"
+            
+            formatted_row.append(s.rjust(cell_width))
+        print("[" + " ".join(formatted_row) + "]")
+    print()
 
 def image_to_mask_matrix(image):
     """Convertit une image en matrice de masque en utilisant OpenCL"""
-    height, width, _ = image.shape
+    height, width, channels = image.shape
     
-    # Convertir en RGBA si nécessaire
-    if image.shape[2] == 3:
-        image_rgba = np.empty((height, width, 4), dtype=np.uint8)
-        image_rgba[..., :3] = image
-        image_rgba[..., 3] = 255
-        image = image_rgba
+    # Conversion en RGB seulement (supprimer RGBA)
+    if channels == 4:
+        image = image[..., :3]  # Garder seulement les canaux RGB
+    elif channels == 1:
+        # Si image en niveaux de gris, convertir en RGB
+        image = np.stack((image[...,0],)*3, axis=-1)
     
     # Aplatir l'image pour le transfert
     image_flat = image.reshape(-1)
@@ -98,107 +114,12 @@ def image_to_mask_matrix(image):
     # Récupérer les résultats
     mask_matrix = np.empty((height, width), dtype=np.int32)
     cl.enqueue_copy(queue, mask_matrix, mask_buf).wait()
-    
+    #print_matrix(mask_matrix, title="Mask Matrix", highlight_color='\033[91m')
     return mask_matrix
 
 
-
-def count_cells2(mask_matrix):
-    """Find and count the number of cells in the mask matrix.
-    This returns the number of cells, as well as an 'image' of cell numbers."""
-    height, width = mask_matrix.shape
-
-    # The maximum number of cells we could ever have is the number of pixels.
-    max_cells = height * width
-
-    # The algorithm we use is called "union find" or "union by rank". You can
-    # read more about it at
-    # https://en.wikipedia.org/wiki/Disjoint-set_data_structure
-
-    # The parent array keeps track of the parent of each pixel. If a pixel is
-    # its own parent, it is a "root pixel".
-    # Note: np.arange(n) creates an array [0, 1, 2, ..., n], so each pixel
-    # starts as a root pixel.
-    parent = np.arange(max_cells, dtype=np.int32)
-    # Rank per pixel, initialized to 0.
-    rank = np.zeros(max_cells, dtype=np.int32)
-
-    def find(x):
-        """Find the root of a pixel."""
-        if parent[x] != x:  # Is this a root pixel?
-            return find(parent[x])  # Doesn't re-assign parent[x]
-        return parent[x]
-
-
-    def union(x, y):
-        """Merge two pixels and their cells."""
-        # Find the root of each pixel
-        rootX = find(x)
-        rootY = find(y)
-
-        if rootX != rootY:
-            # If the roots are different, merge the cells
-            if rank[rootX] > rank[rootY]:
-                # X has a higher rank: make Y a child of X
-                parent[rootY] = rootX
-            elif rank[rootX] < rank[rootY]:
-                # Y has a higher rank: make X a child of Y
-                parent[rootX] = rootY
-            else:
-                # Both have the same rank: make one a child of the other and
-                # increase the rank of the new parent.
-                parent[rootY] = rootX
-                rank[rootX] += 1
-
-    # Iterate over all pixels, and merge neighboring pixels into the same cell.
-    for row in range(height):
-        for col in range(width):
-            if mask_matrix[row, col] == -1:
-                # Background pixel: skip
-                continue
-
-            # Check if the neighbors are part of a cell, and merge with these.
-            # Note: we only need to check the previous (top-left, top,
-            # top-right, and left) neighbors; the later ones (right,
-            # bottom-left, bottom, bottom-right) will check this pixel in their
-            # iteration.
-            for dr, dc in [(-1, -1), (-1, 0), (-1, 1), (0, -1)]:
-                r = row + dr
-                c = col + dc
-
-                # Skip if the neighbor is out of bounds, or a background pixel
-                if r < 0 or r >= height:
-                    continue
-                if c < 0 or c >= width:
-                    continue
-                if mask_matrix[r, c] == -1:
-                    continue
-
-                # Merge the two pixels' cells
-                union(mask_matrix[row, col], mask_matrix[r, c])
-
-    # Create an array to store the cell numbers
-    # Note that cell numbers are not necessarily contiguous.
-    cell_numbers = np.zeros((height, width), dtype=np.int32)
-
-    # Update the cell numbers with the root numbers
-    for row in range(height):
-        for col in range(width):
-            if mask_matrix[row, col] == -1:
-                cell_numbers[row, col] = -1
-            else:
-                cell_numbers[row, col] = find(mask_matrix[row, col])
-
-    # Count the number of cells
-    # Subtract 1 to ignore the background value
-    cell_count = len(np.unique(cell_numbers)) - 1
-
-    # Return the number of cells, as well as the 'image' of cell numbers.
-    # The cell numbers can be used for debugging.
-    return (cell_count, cell_numbers)
-
 def count_cells(mask_matrix):
-    """Find and count the number of cells using OpenCL merge_cells kernel but executing sequentially"""
+    """Find and count the number of cells using OpenCL with atomic operations."""
     height, width = mask_matrix.shape
     max_cells = height * width
 
@@ -208,22 +129,23 @@ def count_cells(mask_matrix):
     parent_buf = cl.Buffer(context, mf.READ_WRITE, size=max_cells * np.dtype(np.int32).itemsize)
     rank_buf = cl.Buffer(context, mf.READ_WRITE, size=max_cells * np.dtype(np.int32).itemsize)
 
-    # La clé est d'exécuter le kernel avec un pixel à la fois
-    # Plutôt que de créer un nouveau kernel, nous exécutons le kernel existant de façon séquentielle
-    for row in range(height):
-        for col in range(width):
-            # Exécute le kernel pour un seul pixel à la fois
-            program.merge_cells(queue, (1, 1), None,
-                           mask_buf, parent_buf, rank_buf,
-                           np.int32(width), np.int32(height),
-                           global_offset=(col, row))  # Déplace le point de départ du work-item
-            queue.finish()  # Assure que le kernel termine avant de traiter le pixel suivant
-    
-    # Lire les résultats
+    # Initialiser parent et rank
+    parent_init = np.arange(max_cells, dtype=np.int32)
+    rank_init = np.zeros(max_cells, dtype=np.int32)
+    cl.enqueue_copy(queue, parent_buf, parent_init).wait()
+    cl.enqueue_copy(queue, rank_buf, rank_init).wait()
+
+    # Exécuter le kernel merge_cells en parallèle
+    program.merge_cells(queue, (width, height), None,
+                       mask_buf, parent_buf, rank_buf,
+                       np.int32(width), np.int32(height))
+    queue.finish()
+
+    # Récupérer les résultats
     parent = np.empty(max_cells, dtype=np.int32)
     cl.enqueue_copy(queue, parent, parent_buf).wait()
-    
-    # Trouver les parents racines pour chaque cellule
+
+    # Compter les cellules (racines uniques)
     cell_numbers = np.zeros((height, width), dtype=np.int32)
     for row in range(height):
         for col in range(width):
@@ -231,18 +153,16 @@ def count_cells(mask_matrix):
             if mask_matrix[row, col] == -1:
                 cell_numbers[row, col] = -1
             else:
-                # Trouver le parent racine
                 root = index
-                while parent[root] != root and parent[root] != 0:  # Ajouter vérification pour éviter boucle infinie
+                while parent[root] != root:
+                    parent[root] = parent[parent[root]]  # Compression de chemin
                     root = parent[root]
                 cell_numbers[row, col] = root
-    
-    # Compter les racines uniques (excluant -1)
+
     unique_cells = np.unique(cell_numbers)
     cell_count = len(unique_cells) - 1 if -1 in unique_cells else len(unique_cells)
-    
+    #print_matrix(cell_numbers, title="Cell Numbers", highlight_color='\033[91m')
     return (cell_count, cell_numbers)
-
 
 def count_cells_flood_fill(mask_matrix):
     """Find and count the number of cells in the mask matrix using a flood
