@@ -88,8 +88,11 @@ def print_matrix(matrix, cell_width=4, decimals=2, title=None, highlight_value=N
     print()
 
 def image_to_mask_matrix(image):
-    """Convertit une image en matrice de masque en utilisant OpenCL"""
-    height, width, _channels = image.shape    
+    height, width, channels = image.shape   
+
+    if channels == 4:
+        image = image[..., :3]  # Only work with RGB channels
+    
     image_flat = image.reshape(-1)
     
     mf = cl.mem_flags

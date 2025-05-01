@@ -54,10 +54,10 @@ int get_neighbour(int x, int y, int width, int height, enum Position pos) {
         case TOP: return (y > 0) ? (y-1)*width + x : -1;
         case TOP_RIGHT: return (x < width-1 && y > 0) ? (y-1)*width + (x+1) : -1;
         case LEFT: return (x > 0) ? y*width + (x-1) : -1;
-        case RIGHT: return (x < width-1) ? y*width + (x+1) : -1; // Nouveau
-        case BOTTOM_LEFT: return (x > 0 && y < height-1) ? (y+1)*width + (x-1) : -1; // Nouveau
-        case BOTTOM: return (y < height-1) ? (y+1)*width + x : -1; // Nouveau
-        case BOTTOM_RIGHT: return (x < width-1 && y < height-1) ? (y+1)*width + (x+1) : -1; // Nouveau
+        case RIGHT: return (x < width-1) ? y*width + (x+1) : -1; 
+        case BOTTOM_LEFT: return (x > 0 && y < height-1) ? (y+1)*width + (x-1) : -1;
+        case BOTTOM: return (y < height-1) ? (y+1)*width + x : -1;
+        case BOTTOM_RIGHT: return (x < width-1 && y < height-1) ? (y+1)*width + (x+1) : -1;
     }
     return -1;
 }
@@ -82,65 +82,39 @@ int find(__global atomic_int* parent, int x) {
 }
 
 
-
-void union_cells(__global atomic_int* parent, __global atomic_int* rank, int x, int y) {
-    int rootX = find(parent, x);
-    int rootY = find(parent, y);
-
-    if (rootX != rootY) {
-        int rankX = atomic_load(&rank[rootX]);
-        int rankY = atomic_load(&rank[rootY]);
-
-        if (rankX > rankY) {
-            if (atomic_cmpxchg(&parent[rootY], rootY, rootX) == rootY) {
-                return;
-            }
-        } 
-        else if (rankX < rankY) {
-            if (atomic_cmpxchg(&parent[rootX], rootX, rootY) == rootX) {
-                return;
-            }
-        } 
-        else {
-            if (atomic_cmpxchg(&parent[rootY], rootY, rootX) == rootY) {
-                atomic_fetch_add(&rank[rootX], 1);
-                return;
-            }
-        }
-        union_cells(parent, rank, x, y);
-    }
-}
-
-
-/*
 void union_cells(__global atomic_int* parent, __global atomic_int* rank, int x, int y) {
     while (1) {
         int rootX = find(parent, x);
         int rootY = find(parent, y);
 
-        if (rootX == rootY) return;
+        if (rootX == rootY) {
+            break;
+        }
 
         int rankX = atomic_load(&rank[rootX]);
         int rankY = atomic_load(&rank[rootY]);
 
-        // Ordre stable pour éviter les conflits symétriques
-        if (rankX > rankY || (rankX == rankY && rootX < rootY)) {
-            // Essaie de faire rootY → rootX
+        if (rankX > rankY) {
             if (atomic_cmpxchg(&parent[rootY], rootY, rootX) == rootY) {
-                if (rankX == rankY) atomic_fetch_add(&rank[rootX], 1);
-                return;
+                break;
             }
-        } else {
-            // Essaie de faire rootX → rootY
+        } 
+        else if (rankX < rankY) {
             if (atomic_cmpxchg(&parent[rootX], rootX, rootY) == rootX) {
-                if (rankX == rankY) atomic_fetch_add(&rank[rootY], 1);
-                return;
+                break;
+            }
+        } 
+        else {
+            if (atomic_cmpxchg(&parent[rootY], rootY, rootX) == rootY) {
+                atomic_fetch_add(&rank[rootX], 1);
+                break;
             }
         }
     }
 }
 
- */
+
+
 
 __kernel void merge_cells(
     __global const int* maskMatrix,
@@ -162,10 +136,11 @@ __kernel void merge_cells(
     int neighbours[8];
     get_all_neighbours(x, y, width, height, neighbours);
     
-    for (int i = 0; i < 4; i++) {
+    for (int i = 0; i < 8; i++) {
         int neighbourIndex = neighbours[i];
         if (neighbourIndex != -1 && maskMatrix[neighbourIndex] != -1) {
             union_cells(parent, rank, index, neighbourIndex);
         }
     }
 }
+
