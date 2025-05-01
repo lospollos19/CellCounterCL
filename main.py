@@ -22,8 +22,65 @@ IMAGES = [
      "./images/tiny-example.bmp",  # Used in the assignment
 ]
 
+def get_optimal_workgroup_size(device, kernel, width, height):
+    """Calcule une taille de work-group optimale avec messages de debug."""
+    if device.type == cl.device_type.CPU:
+        print("[DEBUG] Device CPU - Laisser OpenCL choisir la taille du work-group")
+        return None
+
+    #print(f"[DEBUG] Calcul de la taille optimale pour device: {device.name}")
+
+    # 1. Obtenir les limites matérielles
+    max_wg_size = device.max_work_group_size
+    preferred_multiple = kernel.get_work_group_info(
+        cl.kernel_work_group_info.PREFERRED_WORK_GROUP_SIZE_MULTIPLE,
+        device
+    )
+
+   #print(f"[DEBUG] Max work-group size: {max_wg_size}")
+   #print(f"[DEBUG] Preferred multiple: {preferred_multiple}")
+
+    # 2. Calculer une taille carrée maximale
+    max_dim = int(np.sqrt(max_wg_size))
+    wg_dim = min(max_dim, 16)  # Limité à 16x16 pour la plupart des GPUs
+
+    # 3. Ajuster pour respecter le multiple préféré
+    adjusted_dim = (wg_dim // preferred_multiple) * preferred_multiple
+    wg_dim = max(adjusted_dim, preferred_multiple)
+    
+    #print(f"[DEBUG] Dimension calculée initiale: {wg_dim}x{wg_dim}")
+
+    # 4. Vérifier la compatibilité avec le kernel
+    try:
+        kernel_wg_limit = kernel.get_work_group_info(
+            cl.kernel_work_group_info.WORK_GROUP_SIZE,
+            device
+        )
+        #print(f"[DEBUG] Kernel work-group limit: {kernel_wg_limit}")
+        wg_dim = min(wg_dim, int(np.sqrt(kernel_wg_limit)))
+    except Exception as e:
+        print(f"[DEBUG] Impossible de récupérer la limite du kernel: {str(e)}")
+        pass
+
+    # 5. Forcer une taille valide
+    wg_dim = max(wg_dim, 1)
+    wg_size = (wg_dim, wg_dim)
+
+    # 6. Validation finale
+    if wg_size[0] * wg_size[1] > max_wg_size:
+        print("[WARNING] Taille calculée trop grande - Fallback à (1,1)")
+        wg_size = (1, 1)
+    else:
+        pass
+        #print(f"[DEBUG] Taille optimale validée: {wg_size}")
+
+    return wg_size
+
+
+
 context = cl.create_some_context()
 queue = cl.CommandQueue(context)
+device = context.devices[0]
 kernel_file = os.path.join(os.path.dirname(os.path.realpath(__file__)), "main.cl")
 kernel_code = open(kernel_file).read()
 program = cl.Program(context, kernel_code).build()
@@ -87,11 +144,11 @@ def print_matrix(matrix, cell_width=4, decimals=2, title=None, highlight_value=N
         print("[" + " ".join(formatted_row) + "]")
     print()
 
+
 def image_to_mask_matrix(image):
     height, width, channels = image.shape   
-
     if channels == 4:
-        image = image[..., :3]  # Only work with RGB channels
+        image = image[..., :3]
     
     image_flat = image.reshape(-1)
     
@@ -99,18 +156,26 @@ def image_to_mask_matrix(image):
     img_buf = cl.Buffer(context, mf.READ_ONLY | mf.COPY_HOST_PTR, hostbuf=image_flat)
     mask_buf = cl.Buffer(context, mf.WRITE_ONLY, size=height * width * np.dtype('int32').itemsize)
     
-    program.image_to_mask_matrix(queue, (width, height), None, 
-                               img_buf, mask_buf, 
-                               np.int32(width), np.int32(height))
+    kernel = program.image_to_mask_matrix
+    wg_size = get_optimal_workgroup_size(device, kernel, width, height)
+    
+    # Ajuster la taille globale pour être un multiple de wg_size
+    if wg_size is not None:
+        global_size = (
+            ((width + wg_size[0] - 1) // wg_size[0]) * wg_size[0],
+            ((height + wg_size[1] - 1) // wg_size[1]) * wg_size[1]
+        )
+    else:
+        global_size = (width, height)
+    
+    kernel.set_args(img_buf, mask_buf, np.int32(width), np.int32(height))
+    cl.enqueue_nd_range_kernel(queue, kernel, global_size, wg_size).wait()
     
     mask_matrix = np.empty((height, width), dtype=np.int32)
     cl.enqueue_copy(queue, mask_matrix, mask_buf).wait()
-    #print_matrix(mask_matrix, title="Mask Matrix", highlight_color='\033[91m')
     return mask_matrix
 
-
 def count_cells(mask_matrix):
-    """Find and count the number of cells using OpenCL with atomic operations."""
     height, width = mask_matrix.shape
     max_cells = height * width
 
@@ -119,19 +184,38 @@ def count_cells(mask_matrix):
     parent_buf = cl.Buffer(context, mf.READ_WRITE, size=max_cells * np.dtype(np.int32).itemsize)
     rank_buf = cl.Buffer(context, mf.READ_WRITE, size=max_cells * np.dtype(np.int32).itemsize)
 
+    # Initialisation des structures union-find
     parent_init = np.arange(max_cells, dtype=np.int32)
     rank_init = np.zeros(max_cells, dtype=np.int32)
     cl.enqueue_copy(queue, parent_buf, parent_init).wait()
     cl.enqueue_copy(queue, rank_buf, rank_init).wait()
 
-    program.merge_cells(queue, (width, height), None,
-                       mask_buf, parent_buf, rank_buf,
-                       np.int32(width), np.int32(height))
+    # Configuration de l'exécution
+    kernel = program.merge_cells
+    wg_size = get_optimal_workgroup_size(device, kernel, width, height)
+    
+    # Ajustement de la taille globale
+    if wg_size is not None:
+        global_size = (
+            ((width + wg_size[0] - 1) // wg_size[0]) * wg_size[0],
+            ((height + wg_size[1] - 1) // wg_size[1]) * wg_size[1]
+        )
+    else:
+        global_size = (width, height)
+
+    # Exécution du kernel
+    program.merge_cells(
+        queue, global_size, wg_size,
+        mask_buf, parent_buf, rank_buf,
+        np.int32(width), np.int32(height)
+    )
     queue.finish()
 
+    # Récupération des résultats
     parent = np.empty(max_cells, dtype=np.int32)
     cl.enqueue_copy(queue, parent, parent_buf).wait()
 
+    # Post-traitement CPU (path compression)
     cell_numbers = np.zeros((height, width), dtype=np.int32)
     for row in range(height):
         for col in range(width):
@@ -141,13 +225,14 @@ def count_cells(mask_matrix):
             else:
                 root = index
                 while parent[root] != root:
-                    parent[root] = parent[parent[root]]
+                    parent[root] = parent[parent[root]]  # Path compression
                     root = parent[root]
                 cell_numbers[row, col] = root
 
+    # Comptage des composantes connexes
     unique_cells = np.unique(cell_numbers)
     cell_count = len(unique_cells) - 1 if -1 in unique_cells else len(unique_cells)
-    #print_matrix(cell_numbers, title="Cell Numbers", highlight_color='\033[91m')
+    
     return (cell_count, cell_numbers)
 
 def count_cells_flood_fill(mask_matrix):

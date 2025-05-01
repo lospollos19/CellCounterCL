@@ -143,4 +143,3 @@ __kernel void merge_cells(
         }
     }
 }
-
