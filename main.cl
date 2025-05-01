@@ -162,7 +162,7 @@ __kernel void merge_cells(
     int neighbours[8];
     get_all_neighbours(x, y, width, height, neighbours);
     
-    for (int i = 0; i < 8; i++) {
+    for (int i = 0; i < 4; i++) {
         int neighbourIndex = neighbours[i];
         if (neighbourIndex != -1 && maskMatrix[neighbourIndex] != -1) {
             union_cells(parent, rank, index, neighbourIndex);
