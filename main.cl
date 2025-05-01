@@ -15,7 +15,7 @@ bool is_part_of_cell(uchar3 pixel) {
 
 
 __kernel void image_to_mask_matrix(
-    __global const uchar* inputImage,  // Pointeur générique
+    __global const uchar* inputImage,
     __global int* outputMask,
     int width,
     int height
@@ -25,7 +25,6 @@ __kernel void image_to_mask_matrix(
     
     if (x >= width || y >= height) return;
     
-    // Accès correct pour uchar3
     uchar3 pixel = vload3(y * width + x, inputImage);
     float brightness = calculate_brightness(pixel);
     if (brightness < THRESHOLD)
@@ -43,10 +42,10 @@ enum Position {
     TOP = 1,
     TOP_RIGHT = 2,
     LEFT = 3,
-    RIGHT = 4,       // Ajouté
-    BOTTOM_LEFT = 5, // Ajouté
-    BOTTOM = 6,      // Ajouté
-    BOTTOM_RIGHT = 7 // Ajouté
+    RIGHT = 4,       
+    BOTTOM_LEFT = 5,
+    BOTTOM = 6,     
+    BOTTOM_RIGHT = 7
 };
 
 int get_neighbour(int x, int y, int width, int height, enum Position pos) {
@@ -68,8 +67,6 @@ void get_all_neighbours(int x, int y, int width, int height, int neighbours[8]) 
         neighbours[i] = get_neighbour(x, y, width, height, i);
     }
 }
-/*
-*/
 
 
 int find(__global atomic_int* parent, int x) {
@@ -91,18 +88,59 @@ void union_cells(__global atomic_int* parent, __global atomic_int* rank, int x, 
     int rootY = find(parent, y);
 
     if (rootX != rootY) {
-        if (atomic_load(&rank[rootX]) > atomic_load(&rank[rootY])) {
-            atomic_store(&parent[rootY], rootX);
+        int rankX = atomic_load(&rank[rootX]);
+        int rankY = atomic_load(&rank[rootY]);
+
+        if (rankX > rankY) {
+            if (atomic_cmpxchg(&parent[rootY], rootY, rootX) == rootY) {
+                return;
+            }
         } 
-        else if (atomic_load(&rank[rootX]) < atomic_load(&rank[rootY])) {
-            atomic_store(&parent[rootX], rootY);
+        else if (rankX < rankY) {
+            if (atomic_cmpxchg(&parent[rootX], rootX, rootY) == rootX) {
+                return;
+            }
         } 
         else {
-            atomic_store(&parent[rootY], rootX);
-            atomic_fetch_add(&rank[rootX], 1);
+            if (atomic_cmpxchg(&parent[rootY], rootY, rootX) == rootY) {
+                atomic_fetch_add(&rank[rootX], 1);
+                return;
+            }
+        }
+        union_cells(parent, rank, x, y);
+    }
+}
+
+
+/*
+void union_cells(__global atomic_int* parent, __global atomic_int* rank, int x, int y) {
+    while (1) {
+        int rootX = find(parent, x);
+        int rootY = find(parent, y);
+
+        if (rootX == rootY) return;
+
+        int rankX = atomic_load(&rank[rootX]);
+        int rankY = atomic_load(&rank[rootY]);
+
+        // Ordre stable pour éviter les conflits symétriques
+        if (rankX > rankY || (rankX == rankY && rootX < rootY)) {
+            // Essaie de faire rootY → rootX
+            if (atomic_cmpxchg(&parent[rootY], rootY, rootX) == rootY) {
+                if (rankX == rankY) atomic_fetch_add(&rank[rootX], 1);
+                return;
+            }
+        } else {
+            // Essaie de faire rootX → rootY
+            if (atomic_cmpxchg(&parent[rootX], rootX, rootY) == rootX) {
+                if (rankX == rankY) atomic_fetch_add(&rank[rootY], 1);
+                return;
+            }
         }
     }
 }
+
+ */
 
 __kernel void merge_cells(
     __global const int* maskMatrix,

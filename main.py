@@ -89,29 +89,17 @@ def print_matrix(matrix, cell_width=4, decimals=2, title=None, highlight_value=N
 
 def image_to_mask_matrix(image):
     """Convertit une image en matrice de masque en utilisant OpenCL"""
-    height, width, channels = image.shape
-    
-    # Conversion en RGB seulement (supprimer RGBA)
-    if channels == 4:
-        image = image[..., :3]  # Garder seulement les canaux RGB
-    elif channels == 1:
-        # Si image en niveaux de gris, convertir en RGB
-        image = np.stack((image[...,0],)*3, axis=-1)
-    
-    # Aplatir l'image pour le transfert
+    height, width, _channels = image.shape    
     image_flat = image.reshape(-1)
     
-    # Créer les buffers
     mf = cl.mem_flags
     img_buf = cl.Buffer(context, mf.READ_ONLY | mf.COPY_HOST_PTR, hostbuf=image_flat)
     mask_buf = cl.Buffer(context, mf.WRITE_ONLY, size=height * width * np.dtype('int32').itemsize)
     
-    # Exécuter le kernel
     program.image_to_mask_matrix(queue, (width, height), None, 
                                img_buf, mask_buf, 
                                np.int32(width), np.int32(height))
     
-    # Récupérer les résultats
     mask_matrix = np.empty((height, width), dtype=np.int32)
     cl.enqueue_copy(queue, mask_matrix, mask_buf).wait()
     #print_matrix(mask_matrix, title="Mask Matrix", highlight_color='\033[91m')
@@ -123,29 +111,24 @@ def count_cells(mask_matrix):
     height, width = mask_matrix.shape
     max_cells = height * width
 
-    # Créer les buffers OpenCL
     mf = cl.mem_flags
     mask_buf = cl.Buffer(context, mf.READ_ONLY | mf.COPY_HOST_PTR, hostbuf=mask_matrix.flatten())
     parent_buf = cl.Buffer(context, mf.READ_WRITE, size=max_cells * np.dtype(np.int32).itemsize)
     rank_buf = cl.Buffer(context, mf.READ_WRITE, size=max_cells * np.dtype(np.int32).itemsize)
 
-    # Initialiser parent et rank
     parent_init = np.arange(max_cells, dtype=np.int32)
     rank_init = np.zeros(max_cells, dtype=np.int32)
     cl.enqueue_copy(queue, parent_buf, parent_init).wait()
     cl.enqueue_copy(queue, rank_buf, rank_init).wait()
 
-    # Exécuter le kernel merge_cells en parallèle
     program.merge_cells(queue, (width, height), None,
                        mask_buf, parent_buf, rank_buf,
                        np.int32(width), np.int32(height))
     queue.finish()
 
-    # Récupérer les résultats
     parent = np.empty(max_cells, dtype=np.int32)
     cl.enqueue_copy(queue, parent, parent_buf).wait()
 
-    # Compter les cellules (racines uniques)
     cell_numbers = np.zeros((height, width), dtype=np.int32)
     for row in range(height):
         for col in range(width):
@@ -155,7 +138,7 @@ def count_cells(mask_matrix):
             else:
                 root = index
                 while parent[root] != root:
-                    parent[root] = parent[parent[root]]  # Compression de chemin
+                    parent[root] = parent[parent[root]]
                     root = parent[root]
                 cell_numbers[row, col] = root
 
