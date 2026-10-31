@@ -1,4 +1,3 @@
-numpy~=2.2.1
-opencv-python~=4.11.0.86
-pyopencl[pocl]~=2024.3
-Pillow~=11.1.0
+numpy>=2.0,<3
+pyopencl>=2024.3
+Pillow>=11.0
